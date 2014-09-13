@@ -6,243 +6,37 @@
 #include <termios.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <getopt.h>
+
 #include "bp.h"
 #include "nrf24le1.h"
+#include "device.h"
 
-// Debug printing
-// #define TRACE_MSG	{printf("%s() [%s:%d] here\n", __FUNCTION__, __FILE__, __LINE__);}
-#define TRACE_MSG	{}
 
-#define s2b(s, b) {\
-	b[1] = s & 0xFF;\
-	b[0] = (s >> 8) & 0xFF;\
+#define pack_addr(s, b) {\
+	b[2] = s & 0xFF;\
+	b[1] = (s >> 8) & 0xFF;\
 }
 
-/* Open a serial port */
-int ser_open(char *port) {
-	int fd;
-	struct termios cfg;
-
-	TRACE_MSG;
-
-	// Open the port
-	fd = open(port, O_RDWR | O_NOCTTY | O_NDELAY);
-	if(fd == -1) {
-		printf("Could not open the serial port: %s\n", port);
-		exit(-1);
-	}
-	
-	// Set the flags, make sure we're using the nonblocking interface
-	fcntl(fd, F_SETFL, FNDELAY);
-
-	// Get the port's current configuration
-	tcgetattr(fd, &cfg);
-	// Set the baud rate to 115200
-	cfsetispeed(&cfg, B115200);
-	cfsetospeed(&cfg, B115200);
-	// Enable the receiver
-	cfg.c_cflag |= CREAD;
-	// Set the data bits to 8
-	cfg.c_cflag &= ~CSIZE;
-	cfg.c_cflag |= CS8;
-	// Set the parity to none
-	cfg.c_cflag &= ~PARENB;
-	// Set the stop bits to 1
-	cfg.c_cflag &= ~CSTOPB;
-	// Disable HW Flow Control
-	// cfg.c_cflag &= ~CNEW_RTSCTS;
-	// Set I/O to RAW
-	cfg.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-	cfg.c_oflag &= ~OPOST;
-	// Disable Software Flow Control
-	cfg.c_iflag &= ~(IXON | IXOFF | IXANY);
-	// Send the config to the port
-	tcsetattr(fd, TCSANOW, &cfg);
-	return fd;
-}
-
-/* Close the serial port */
-void ser_close(int fd) {
-	TRACE_MSG;
-	close(fd);
-}
-
-/* Write a stream of bytes to the serial port */
-void ser_write(int fd, uint8_t *stream, uint16_t sz) {
-	int ret, ct;
-	uint8_t c;
-	TRACE_MSG;
-
-	// Write out one byte at a time
-	for(ct=0; ct<sz; ct++) {
-#ifdef DEBUG_PRINT
-		printf("0x%02X ", stream[ct]);
-#endif
-		c = stream[ct];
-		ret = write(fd, &c, 1);
-		if(ret != 1) {
-			printf("Unable to write to the port!\n");
-			close(fd);
-			exit(-1);
-		}
-	}
-#ifdef DEBUG_PRINT
-	printf("\n");
-#endif
-	return;
-}
-
-/* Write a single byte command to the serial port */
-void ser_cmd(int fd, int cmd) {
-	uint8_t ccmd = cmd;	
-	TRACE_MSG;
-	ser_write(fd, &ccmd, 1);
-	// Delay for the hardware to respond
-	usleep(10000);
-	return;
-}
-
-/* Set the bus pirate to binary mode */
-void ser_bp_bin(int fd) {
-	int count, ret;
-	char buf[6];
-	TRACE_MSG;
-	memset(buf, 0, 6);
-
-	// We try up to 25 times to make it work
-	for(count=0; count < 25; count++) {
-		ser_cmd(fd, BP_BIN_RESET);
-		ret = read(fd, buf, 5);
-#ifdef DEBUG_PRINT
-		int tmp;
-		printf("sz: %i\n", ret);
-		for(tmp=0; tmp<ret; tmp++)
-			printf("0x%X %c\n", buf[tmp], buf[tmp]);
-#endif
-		if(ret == 5 && strncmp(buf, BP_BINARY_STRING, 5) == 0) {
-			// In binary mode!
-			return;
-		}
-	}
-	printf("Unable to put Bus Pirate in Binary Mode!\n");
-	exit(-1);
-}
-
-/* Set the bus pirate back to normal mode */
-void ser_bp_exit_bin(int fd) {
-	int ret, count;
-	uint8_t buf;
-	TRACE_MSG;
-
-	// Make sure we're in the BBIO and not anywhere else
-	ser_bp_bin(fd);
-
-	// Reset to normal mode
-	for(count=0; count<25; count++) {
-		// Reset the BP
-		ser_cmd(fd, BP_RESET);
-
-		// Check that we got the reset response
-		ret = read(fd, &buf, 1);
-#ifdef DEBUG_PRINT
-		printf("ret = %i (0x%X) %c\n", ret, buf, buf);
-#endif
-
-		if(buf == BP_RESP_SUCCESS)
-			break;
-		
-	}
-	return;
-}
-
-/* Check a response */
-void check_resp(int fd, char *err) {
-	int ret, ct = 0;
-	uint8_t buf;
-	TRACE_MSG;
-
-	// Check up to 25 times for a response
-	while(ct < 25) {
-		ret = read(fd, &buf, 1);
-		if(ret != -1)
-			break;
-		// If we didn't get any data, wait for 0.25s and try again
-		usleep(250000);
-		ct++;
-	}
-#ifdef DEBUG_PRINT
-	printf("Response: 0x%X (%c)\n", buf, buf);
-#endif
-	if(buf != BP_RESP_SUCCESS) {
-		// Try to set the bus pirate back to normal mode
-		ser_bp_exit_bin(fd);
-		// Close the connection
-		ser_close(fd);
-		printf("%s failed\n", err);
-		exit(-1);
-	} 
-#ifdef DEBUF_PRINT
-	else {
-		printf("%s succeeded\n", err);
-	}
-#endif
-	return;
-}
-
-/* Configure the BP SPI Mode */
-void ser_bp_spi_cfg(int fd) {
-	int ret;
-	char buf[5];
-	TRACE_MSG;
-	memset(buf, 0, 5);
-
-	// Go to SPI Mode	
-	ser_cmd(fd, BP_SPI);
-
-	// Check that we're in SPI Mode
-	ret = read(fd, &buf, 4);
-	if(ret == 4 && strncmp(buf, BP_SPI_STRING, 4) == 0) {
-		// Set the SPI Speed to 30KHz
-		ser_cmd(fd, BP_SPI_SPEED(BP_SPI_SPEED_30K));
-		check_resp(fd, "SPI Set Speed");
-
-		// Set the SPI Configuration (pin output 3.3V, Clock Idle Phase Low, Clock Edge Active to Idle = 1), Sample Time Middle)
-		ser_cmd(fd, BP_SPI_CFG((BP_SPI_CFG_3v3 | BP_SPI_CFG_CKE)));
-		check_resp(fd, "SPI Configuration");
-
-		// Turn on the power and AUX Pins
-		ser_cmd(fd, BP_SPI_PERF((BP_SPI_PERF_POWER | BP_SPI_PERF_AUX)));
-		check_resp(fd, "SPI Turn on Power and AUX");
-	
-		// Turn off the AUX pin to reset the chip
-		ser_cmd(fd, BP_SPI_PERF(BP_SPI_PERF_POWER));
-		check_resp(fd, "SPI Turn off the AUX pin");
-	
-		// Turn on the AUX pin to release the chip from reset
-		ser_cmd(fd, BP_SPI_PERF((BP_SPI_PERF_POWER | BP_SPI_PERF_AUX)));
-		check_resp(fd, "SPI Turn on AUX pin");
-	}
-	
-	// Wait 15 seconds to set up the xprotolab
-	printf("Waiting to set up the XProtoLab\n");
-//	usleep(15000000);
-	usleep(3000000);
-	return;
-}
+/* TODO: Proper SPI adaptor registration factory */
+static struct spi_device *spi; 
 
 /* Load a hex file */
-void hf_read(char *fn, uint8_t **data, uint32_t *sz) {
+int hf_read(char *fn, uint8_t **data, uint32_t *sz) {
 	FILE *f;
 	int line = 0, i, done = 0;
 	uint8_t byte_count, rec_type, checksum, c_checksum;
 	uint16_t address = 0, address_high = 0;
 	char buf[532];
 	uint8_t dat[256];
-	TRACE_MSG;
 
 	// Open the file
 	f = fopen(fn, "r");
-
+	if (!f) { 
+		perror("fopen");
+		return 1;
+	}
 	// Allocate 16kbytes, the max size
 	*sz = NRF24_FLASH_SZ;
 	
@@ -314,305 +108,329 @@ void hf_read(char *fn, uint8_t **data, uint32_t *sz) {
 	}
 	// Complete
 	fclose(f);
-	return;
-}
-
-/* Execute an SPI command */
-void spi_cmd(int fd, uint8_t *cmd, int cmd_len, char *err) {
-	uint16_t write_bytes, read_bytes;
-	uint8_t b[2];
-	TRACE_MSG;
-	
-	// Initiate the WR_RD operation
-	ser_cmd(fd, BP_SPI_WR_RD);	
-
-	// Send the read/write length and command bytes
-	write_bytes = cmd_len; read_bytes = 0;
-	s2b(write_bytes, b);
-	ser_write(fd, (uint8_t *) &b, 2);
-	s2b(read_bytes, b);
-	ser_write(fd, (uint8_t *) &b, 2);
-	ser_write(fd, cmd, write_bytes);
-	check_resp(fd, "SPI Command");
-	return;	
-}
-
-/* Execute the SPI Read command */
-void spi_read(int fd, uint8_t *buf, uint16_t len, int start_addr, char *err) {
-	uint16_t write_bytes = 3;
-	uint8_t bytes[3];
-	int pos, err_ct = 0;
-	TRACE_MSG;
-	
-	// Initiate the WR_RD operation
-	ser_cmd(fd, BP_SPI_WR_RD);
-
-	// Send the read/write length and command bytes
-	s2b(write_bytes, bytes);
-	ser_write(fd, (uint8_t *) bytes, 2);
-	s2b(len, bytes);
-	ser_write(fd, (uint8_t *) bytes, 2);
-	// Setup the write buffer
-	bytes[0] = NRF24_SPI_READ;
-	ser_write(fd, (uint8_t *) bytes, 1);
-	s2b(start_addr, bytes);
-	ser_write(fd, bytes, 2);
-	// Delay for the response
-	check_resp(fd, "SPI Read");
-	
-	// Read in the data
-#ifdef DEBUG_PRINT
-	printf("READ %i bytes\n", len);
-#endif
-	for(pos = 0; pos < len; pos++) {
-		err_ct = 0;
-		while(read(fd, &(buf[pos]), 1) != 1) {
-			usleep(1000);
-			err_ct++;	
-			if(err_ct > 25) {
-				printf("Unable to read!\n");
-				break;
-			}
-		}
-#ifdef DEBUG_PRINT
-		printf("0x%02X ", buf[pos]);
-#endif
-	}
-#ifdef DEBUG_PRINT
-	printf("\n");
-#endif
-
-	return;	
-}
-
-/* SPI Wait for a write to get an expected response */
-void spi_wait(int fd, uint8_t *cmd, uint16_t len,  char *resp_exp, uint16_t resp_len, char *err) {
-	int ct, rd_ct, err_ct = 0;
-	uint16_t write_bytes, read_bytes;
-	uint8_t bytes[3];
-	char *buf;
-	TRACE_MSG;
-
-	buf = (char *)malloc(resp_len * sizeof(char));
-	for(ct = 0; ct < 25; ct++) {
-		// Initiate the WR_RD operation
-		ser_cmd(fd, BP_SPI_WR_RD);
-
-		// Send the read/write length and command bytes
-		write_bytes = len; read_bytes = resp_len;
-		s2b(write_bytes, bytes);
-		ser_write(fd, (uint8_t *) bytes, 2);
-		s2b(read_bytes, bytes);
-		ser_write(fd, (uint8_t *) bytes, 2);
-
-		// Send the command
-		ser_write(fd, cmd, len);
-
-		// Get the response
-		check_resp(fd, "SPI CMD Write\n");
-
-		// Get the result
-		for(rd_ct=0; rd_ct < resp_len; rd_ct++) {
-			err_ct = 0;
-			while(read(fd, &(buf[rd_ct]), 1) != 1) {
-				usleep(1000);
-				err_ct++;	
-				if(err_ct > 25) {
-					printf("Unable to read!\n");
-					break;
-				}
-			}
-		}
-
-		// Check it
-		if(strncmp(buf, resp_exp, resp_len) == 0)
-			break;
-	}
-	free(buf);
-	return;
-}
-
-/* Execute an SPI Write command */
-void spi_write(int fd, uint8_t *buf, uint16_t len, int start_addr, char *err) {
-	char result;
-	uint16_t write_bytes, read_bytes;
-	uint8_t bytes[3];
-	TRACE_MSG;
-
-	// Set WREN to enable writing
-	bytes[0] = NRF24_SPI_WREN;
-	spi_cmd(fd, bytes, 1, "Enable Writing");
-	
-	// Initiate the WR_RD operation
-	ser_cmd(fd, BP_SPI_WR_RD);
-	
-	// Send the read/write length and command bytes
-	write_bytes = 3 + len; read_bytes = 0;
-	s2b(write_bytes, bytes);
-	ser_write(fd, (uint8_t *) bytes, 2);
-	s2b(read_bytes, bytes);
-	ser_write(fd, (uint8_t *) bytes, 2);
-
-	// Setup the write buffer
-	bytes[0] = NRF24_SPI_PROGRAM;
-	ser_write(fd, bytes, 1);
-	s2b(start_addr, bytes);
-	ser_write(fd, bytes, 2);
-	ser_write(fd, buf, len);
-	check_resp(fd, "SPI Write");
-
-	// Check that we've completed the write command
-	bytes[0] = NRF24_SPI_RDSR;
-	result = 0;
-	spi_wait(fd, bytes, 1,  &result, 1, "Waiting for the write to complete");
-	return;	
-}
-
-/* Read from the device and output a data file
- * ip == 1 if we want to read out the info page
- */
-void read_hex(int fd, int ip, char *fn) {
-	uint16_t read_bytes, pos;
-	uint8_t *bytes, cmd[2];
-	int fout;
-	TRACE_MSG;
-	
-	// Allocate memory
-	bytes = (uint8_t *) malloc(sizeof(uint8_t) * NRF24_FLASH_SZ);
-
-	// Set up the read operation FSR
-	if(ip) {
-		cmd[0] = NRF24_SPI_WRSR;
-		cmd[1] = 0x08;
-	} else {
-		cmd[0] = NRF24_SPI_WRSR;
-		cmd[1] = 0x00;
-	}
-	spi_cmd(fd, cmd, 2, "FSR Register Write");
-
-	// Do the Read Operation
-	if(ip) 
-		read_bytes = NRF24_INFO_SZ;
-	else 
-		read_bytes = NRF24_FLASH_SZ;
-
-	for(pos=0; pos < read_bytes; pos = pos + NRF24_BLOCK_SZ) 
-		spi_read(fd, &(bytes[pos]), NRF24_BLOCK_SZ, pos, "Flash Read");
-
-	// Open the output file
-	fout = open(fn, O_RDWR | O_CREAT, 0666);
-	if(fout == -1) {
-		printf("Unable to open the file for writing\n");
-		exit(-1);
-	}
-
-	// Write out the data
-	for(pos = 0; pos < read_bytes; pos++)
-		write(fout, &(bytes[pos]), 1);
-
-	// Free the memory
-	free(bytes);
-	
-	// Close the output file
-	close(fout);
-	return;
-}
-
-/* Write a hex file to the device */
-int write_hex(int fd, char *fn) {
-	uint8_t *data;
-	uint8_t *verify_data;
-	uint32_t sz;
-	int pos;
-	uint8_t cmd_bytes[8];
-	char result;
-	TRACE_MSG;
-
-	// Open the hex file
-	hf_read(fn, &data, &sz);
-	
-	// Make sure INFEN is low so we don't erase the IP
-	cmd_bytes[0] = NRF24_SPI_WRSR;
-	cmd_bytes[1] = 0x00;
-	spi_cmd(fd, cmd_bytes, 2, "Set INFEN");
-
-	// Write the data by 1024 byte blocks
-	for(pos = 0; pos < sz; pos = pos + NRF24_BLOCK_SZ) {
-		// Set WREN to enable writing
-		cmd_bytes[0] = NRF24_SPI_WREN;
-		spi_cmd(fd, cmd_bytes, 1, "Enable Writing");
-
-		// Next, we erase the block we're overwriting
-		cmd_bytes[0] = NRF24_SPI_ERASE_PAGE;
-		cmd_bytes[1] = pos / NRF24_BLOCK_SZ;
-		spi_cmd(fd, cmd_bytes, 2, "Erase Page");
-	
-		// Check that we've completed the erase command
-		cmd_bytes[0] = NRF24_SPI_RDSR;
-		result = 0;
-		spi_wait(fd, cmd_bytes, 1,  &result, 1, "Waiting for the erase to complete");
-
-		// Write the data
-		spi_write(fd, &(data[pos]), NRF24_BLOCK_SZ, pos, "Writing to Flash");
-	}
-
-	// Read out the data
-	verify_data = (uint8_t *)calloc(sizeof(uint8_t), NRF24_FLASH_SZ);
-	for(pos=0; pos < sz; pos = pos + NRF24_BLOCK_SZ) {
-		spi_read(fd, &(verify_data[pos]), NRF24_BLOCK_SZ, pos, "Flash Read");
-	}
-
-	// Verfiy that the flash was performed correctly
-	result = 0;
-	for(pos = 0; pos < sz; pos++) {
-		if(data[pos] != verify_data[pos]) {
-			printf("Error at address: 0x%08X: 0x%02X != 0x%02X\n", pos, verify_data[pos], data[pos]);
-			result = 1;
-		}
-	}
-
-	// Release the used memory
-	free(data);
-	free(verify_data);
-	
-	return result;
-}
-
-/* The main program, doesn't do much */
-int main(int argc, char **argv) {
-	int fd;
-	TRACE_MSG;
-
-	printf("Opening the Bus Pirate UART\n");
-	fd = ser_open("/dev/ttyUSB0");
-	
-	printf("Setting the Bus Pirate to Binary Mode\n");
-	ser_bp_bin(fd);
-
-	printf("Configuring SPI mode\n");
-	ser_bp_spi_cfg(fd);
-
-	printf("Backing up the info page\n");
-	read_hex(fd, 1, "info_page.dat");
-
-	// Read/Write the Hex File, if requested
-	if(argc > 1) {
-		// If we can't open the file, we're reading out the memory contents into it
-		if(access(argv[1], R_OK)) {	
-			printf("Reading from the device to %s\n", argv[1]);
-			read_hex(fd, 0, argv[1]);
-		// Otherwise, write it out
-		} else {
-			printf("Writing %s to the device\n", argv[1]);
-			if(write_hex(fd, argv[1]) == 0)
-				printf("Write Verified\n");
-		}
-	}
-
-	printf("Putting the Bus Pirate back in normal operating mode\n");
-	ser_bp_exit_bin(fd);
-
-	printf("Closing the Bus Pirate\n");
-	ser_close(fd);
 	return 0;
+}
+
+
+void flash_dump(char* filename, int len)
+{
+	FILE *fd = fopen(filename, "wb+"); 
+	int toread = len;
+	char cmd[] = { NRF24_SPI_READ, 0x0, 0x0 }; 
+	char tmp[4096];
+	int chunksize = (len < 4096) ? len : 4096;
+ 
+	printf("Dumping flash to %s", filename);
+	fflush(stdout);
+	spi->cs(0);
+	spi->write(cmd, 3);
+	while (toread) { 
+		spi->read(tmp, chunksize); 
+		fwrite(tmp, chunksize, 1, fd);
+		toread -= chunksize;
+		printf(".");
+		fflush(stdout);
+	}
+	spi->cs(1);
+	printf("done!\n");
+}
+
+
+int flash_verify_buffer(char* data, int len, int offset)
+{
+	int addr = 0;
+	int toread = len;
+	char cmd[] = { NRF24_SPI_READ, 0x0, 0x0 }; 
+	char tmp[4096];
+	int i; 
+	fflush(stdout);
+	spi->cs(0);
+	spi->write(cmd, 3);
+	printf("Verifying...");
+	while (len) {
+		toread = (len < 4096) ? len : 4096;
+		spi->read(tmp, toread); 
+		for (i = 0; i< toread; i++) 
+			if (data[i] != tmp[i]) { 
+				printf("Mismatch at address 0x%x\n", addr + i);
+				return 1;
+//				exit(1);
+			}
+		addr += toread;
+		data += toread;
+		len -= toread;
+		printf(".");
+		fflush(stdout);
+	}
+	spi->cs(1);
+	printf("done!\n");
+}
+
+#define BANK_INFO 0
+#define BANK_DATA 1
+void flash_select_bank(int bank) 
+{
+	char byte = (bank == BANK_INFO) ? 0x8 : 0x0; 
+	char cmd[] = { NRF24_SPI_WRSR,  byte }; 
+	spi->cs(0);
+	spi->write(cmd, 2);
+	spi->cs(1);	
+}
+
+int flash_write_enable()
+{
+	char cmd[] = { NRF24_SPI_WREN };
+	spi->cs(0);
+	spi->write(cmd, 1); 
+	spi->cs(1);	
+}
+
+
+int flash_status(uint8_t *status)
+{
+	char cmd[] = { NRF24_SPI_RDSR };
+	spi->cs(0);
+	spi->write(cmd, 1);
+	spi->read(cmd, 1); 
+	spi->cs(1); 
+	*status = cmd[0];
+	return 0;
+}
+
+int flash_wait()
+{
+	uint8_t status;
+	do  { 
+		flash_status(&status);
+	} while (status);
+	return 0; 	
+}
+
+int flash_erase_all()
+{
+	printf("Erasing everything...");
+	fflush(stdout);
+
+	flash_write_enable();
+
+	char cmd[] = { NRF24_SPI_ERASE_ALL };
+	spi->cs(0);
+	spi->write(cmd, 1); 
+	spi->cs(1);
+
+	flash_wait();
+}
+
+int flash_erase(int addr)
+{
+	uint8_t npage = (addr >> NRF24_PAGESHIFT);
+	char cmd[] = { NRF24_SPI_ERASE_PAGE, npage };
+	flash_write_enable();
+
+	spi->cs(0);
+	spi->write(cmd, 2); 
+	spi->cs(1);
+	flash_wait();
+}
+
+int flash_write_buffer(char* data, int len, int addr)
+{
+	char cmd[] = { NRF24_SPI_PROGRAM, 0x0, 0x0 }; 
+	int towrite; 
+
+	int chunksize = 256; 
+
+	printf("Erasing blocks ");
+	fflush(stdout);
+	int i; 
+	
+	for (i=addr; i < addr + len; i = i + NRF24_BLOCK_SZ)
+		flash_erase(i), printf(".", i >> NRF24_PAGESHIFT), fflush(stdout);
+	
+	printf("done!\n");
+	printf("Writing data ");
+	while (len) {
+		flash_write_enable();
+
+		towrite = (len > chunksize) ? chunksize : len; 
+		pack_addr(addr, cmd);
+
+		spi->cs(0); 
+		spi->write(cmd, 3); 
+		spi->write(data, towrite);
+		spi->cs(1);
+ 
+		data+=towrite;
+		len-=towrite;
+		addr+=towrite;
+
+		fflush(stdout);
+		printf(".");
+
+		flash_wait();
+
+	}
+	printf("Done!\n");
+}
+
+
+static int current_file_type; 
+static struct option long_options[] =
+{
+	/* Take care of the file types. */
+	{"ihx",   no_argument,       &current_file_type, 1},
+	{"bin",   no_argument,       &current_file_type, 0},
+	/* These options don’t set a flag.
+	   We distinguish them by their indices. */
+	{"winfo",     required_argument,       0, 'w'},
+	{"rinfo",     required_argument,       0, 'r'},
+	{"wflash",    required_argument,       0, 'W'},
+	{"rflash",    required_argument,       0, 'R'},
+	{"offset",    required_argument,       0, 'o'},
+	{"length",    required_argument,       0, 'l'},
+	{"help",      no_argument,             0, 'h'},
+	{"eraseall",  no_argument,             0, 'E'},
+	{"erase",     required_argument,       0, 'e'},	
+	{0, 0, 0, 0}
+};
+
+
+void usage(char* s) {
+	fprintf(stderr, 
+		"nrfDude: An SPI-programming app for nrf24lu1 chips\n"
+		"Loosely based on nrfprog by Joseph Jezak\n"
+		"(c) Andrew 'Necromant' Andrianov 2014\n"
+		"Usage: %s operation filename [operation arg] ...\n"
+		"Operations are executed from left to right\n"
+		"Valid ops are: \n"
+		"   --ihx  - set file format to ihx\n"
+		"   --bin  - set file format to binary(default)\n"
+		"   --rinfo  filename - read infopage to filename\n"
+		"   --winfo  filename - write infopage from filename\n"
+		"   --rflash filename - read flash to filename\n"
+		"   --wflash filename - write flash from filename\n"
+		"   --length len - Read/Write only fist len bytes of file\n"
+		"   --eraseall - erase the whole flash\n"
+		"   --erase len - Erase len bytes from --offset (default - 0), round up to pages\n"
+		"   --help  - Show this useless help message\n\n"
+		"If you didn't get the above, examples: \n"
+		"   %s --bin --rinfo info.backup.bin   - Read out infopage\n"
+		"   %s --ihx --rflash flash.backup.ihx - Read out flash\n"
+		"   %s --bin --wflash flash.bin        - Write flash\n"
+		"More complex stuff: \n"
+		"   %s --bin --rflash flash.backup.bin --ihx --wflash flash.bin - Backup old firmware, flash new\n\n"
+		"   %s --bin --len 8192 --offset 8192 --rflash flash.backup.bin - Backup 8K of firmware starting at 8K\n\n"
+
+		"Well, you got the idea!\n"
+		"This is 146%% free software, licensed under GNU GPLv3\n",
+		s,s,s,s,s,s
+		);
+}
+
+
+int check_spi_adaptor() 
+{
+	if (NULL==spi) { 
+		spi=&uisp_device;
+		if (0 != spi->init(NULL, NULL))
+			exit(1);
+	}
+}
+
+int getfile(char *filename, char* dstbuf, int len) 
+{
+	if (current_file_type) { 
+		uint8_t *data; 
+		uint32_t sz; 
+		if (0 != hf_read(filename, &data, &sz))
+			return 1;
+		memcpy(dstbuf, data, sz);
+		free(data); 
+		return 0;
+	}
+	/* Binary fmt */
+	
+	FILE *fd = fopen(filename, "rb");
+	if (!fd) { 
+		perror("fopen"); 
+		return 1; 
+	}
+	int ret = fread(dstbuf, 1, len, fd);
+	printf("Loaded %d bytes of data from file %s\n", ret, filename);
+	return 0;
+}
+
+int main(int argc, char **argv) {
+	char c;
+	int option_index;
+	int offset = 0; 
+	int length = 16*1024;
+	char*  tmp = malloc(NRF24_FLASH_SZ) ; /* Buffer for all out data */ 
+	memset(tmp, 0x0, NRF24_FLASH_SZ);
+
+	while (1) { 
+		c = getopt_long (argc, argv, "w:W:r:R:o:l:hEe:",
+				 long_options, &option_index);
+		/* Detect the end of the options. */
+		if (c == -1)
+			break;
+		
+		switch (c) {
+		case 'h':
+			usage(argv[0]);
+			exit(1);
+			break;
+		case 'o':
+			offset = atoi(optarg); 
+			break;
+		case 'l':
+			length = atoi(optarg); 
+			break;
+		case 'e': { 
+			int i; 
+			int len = atoi(optarg); 
+			check_spi_adaptor();
+			printf("Erasing flash from 0x%x to 0x%x", 
+			       (offset & ~(NRF24_BLOCK_SZ-1)), 
+			       ((offset + len) & ~(NRF24_BLOCK_SZ-1)));
+			fflush(stdout);
+			for (i = offset; i < offset + len; i+= NRF24_BLOCK_SZ)
+				flash_erase(i), printf("."), fflush(stdout);
+			printf("done!\n");
+		}
+		case 'E':
+			check_spi_adaptor();
+			flash_erase_all();			
+			break;
+		case 'w':
+			check_spi_adaptor();
+			flash_select_bank(BANK_INFO);
+			if (0 != getfile(optarg, tmp, NRF24_INFO_SZ))
+				exit(1);
+			flash_write_buffer(tmp, NRF24_INFO_SZ, 0);
+			break;
+
+		case 'r':
+			check_spi_adaptor();
+			flash_select_bank(BANK_INFO);
+			flash_dump(optarg, NRF24_INFO_SZ);
+			break;
+
+		case 'R':
+			check_spi_adaptor();
+			flash_select_bank(BANK_DATA);
+			flash_dump(optarg, length);
+			break;
+
+		case 'W': { 
+			check_spi_adaptor();
+			flash_select_bank(BANK_DATA);
+			if (0 != getfile(optarg, tmp, length))
+				exit(1);
+			flash_write_buffer(tmp, length, offset);
+			flash_verify_buffer(tmp, length, offset);
+			break;
+			}
+		}
+	}	
 }

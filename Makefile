@@ -1,8 +1,10 @@
 all:	nrfprog
-CFLAGS=-ggdb -Wall
+CFLAGS=-ggdb -Wall -lusb
 
-nrfprog: nrfprog.c bp.h nrf24le1.h
-	gcc ${CFLAGS} -o nrfprog nrfprog.c
+CFILES=nrfprog.c device-uisp-flashrom.c
+
+nrfprog: $(CFILES) bp.h nrf24le1.h
+	gcc $(CFLAGS) -g -O0 -fstack-protector -o nrfprog $(CFILES)
 
 clean:
 	rm -f nrfprog
