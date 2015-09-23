@@ -10,7 +10,7 @@
 #include <getopt.h>
 
 #include "bp.h"
-#include "nrf24le1.h"
+#include "nrf24lu1.h"
 #include "device.h"
 
 
@@ -120,7 +120,7 @@ void flash_dump(char* filename, int len)
 	char tmp[4096];
 	int chunksize = (len < 4096) ? len : 4096;
  
-	printf("Dumping flash to %s", filename);
+	printf("Dumping flash to %s len %d", filename, len);
 	fflush(stdout);
 	spi->cs(0);
 	spi->write(cmd, 3);
@@ -153,8 +153,8 @@ int flash_verify_buffer(char* data, int len, int offset)
 		for (i = 0; i< toread; i++) 
 			if (data[i] != tmp[i]) { 
 				printf("Mismatch at address 0x%x\n", addr + i);
+				spi->cs(1);
 				return 1;
-//				exit(1);
 			}
 		addr += toread;
 		data += toread;
@@ -175,6 +175,7 @@ void flash_select_bank(int bank)
 	spi->cs(0);
 	spi->write(cmd, 2);
 	spi->cs(1);	
+
 }
 
 int flash_write_enable()
@@ -202,6 +203,7 @@ int flash_wait()
 	uint8_t status;
 	do  { 
 		flash_status(&status);
+		status = status & (1<<4); /* Ignore INFEN bit */
 	} while (status);
 	return 0; 	
 }
@@ -331,7 +333,7 @@ void usage(char* s) {
 int check_spi_adaptor() 
 {
 	if (NULL==spi) { 
-		spi=&uisp_device;
+		spi= &uisp_device;
 		if (0 != spi->init(NULL, NULL))
 			exit(1);
 	}
@@ -408,6 +410,7 @@ int main(int argc, char **argv) {
 			if (0 != getfile(optarg, tmp, NRF24_INFO_SZ))
 				exit(1);
 			flash_write_buffer(tmp, NRF24_INFO_SZ, 0);
+			flash_verify_buffer(tmp, NRF24_INFO_SZ, 0);
 			break;
 
 		case 'r':
